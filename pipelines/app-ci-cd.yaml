@@ -11,8 +11,8 @@
 #   AWS-SECRET-ACCESS-KEY   → AWS IAM secret key
 #   AWS-REGION              → e.g. ap-southeast-1
 #   EKS-CLUSTER-NAME        → EKS cluster name
-#   APP1-IMAGE-TAG          → Nginx image tag for app1
-#   APP2-IMAGE-TAG          → Nginx image tag for app2
+#   APP1-VALUES-YAML        → Complete values.yaml payload for app1
+#   APP2-VALUES-YAML        → Complete values.yaml payload for app2
 #
 # Required non-secret Variable Group (plain values only):
 #   - "pipeline-config"  → AKV_NAME, AZURE_SERVICE_CONNECTION, NAMESPACE
@@ -153,6 +153,7 @@ stages:
     dependsOn: DeployIstio
     condition: succeeded()
     jobs:
+      # ── Deploy App1 ───────────────────────────────────────────────────────
       - deployment: DeployApp1
         displayName: "Helm deploy app1"
         environment: "production"
@@ -189,10 +190,8 @@ stages:
                     AWS_DEFAULT_REGION: $(AWS-REGION)
 
                 - script: |
-                    # Write the values.yaml payload from Key Vault secret to local file
-                    cat << 'EOF' > app1-values-override.yaml
-$(APP1-VALUES-YAML)
-EOF
+                    # Write the values.yaml payload from Key Vault env var to local file
+                    echo "$APP_VALUES_YAML" > app1-values-override.yaml
 
                     # Verify that a valid values.yaml file was created
                     if [ ! -s app1-values-override.yaml ]; then
@@ -224,7 +223,9 @@ EOF
                   env:
                     AWS_ACCESS_KEY_ID: $(AWS-ACCESS-KEY-ID)
                     AWS_SECRET_ACCESS_KEY: $(AWS-SECRET-ACCESS-KEY)
+                    APP_VALUES_YAML: $(APP1-VALUES-YAML)
 
+      # ── Deploy App2 ───────────────────────────────────────────────────────
       - deployment: DeployApp2
         displayName: "Helm deploy app2"
         environment: "production"
@@ -234,6 +235,7 @@ EOF
               steps:
                 - checkout: self
 
+                # ── Fetch ALL required secrets ──────────────────────────────
                 - task: AzureKeyVault@2
                   displayName: "Fetch secrets from Azure Key Vault"
                   inputs:
@@ -257,10 +259,8 @@ EOF
                     AWS_DEFAULT_REGION: $(AWS-REGION)
 
                 - script: |
-                    # Write the values.yaml payload from Key Vault secret to local file
-                    cat << 'EOF' > app2-values-override.yaml
-$(APP2-VALUES-YAML)
-EOF
+                    # Write the values.yaml payload from Key Vault env var to local file
+                    echo "$APP_VALUES_YAML" > app2-values-override.yaml
 
                     # Verify that a valid values.yaml file was created
                     if [ ! -s app2-values-override.yaml ]; then
@@ -292,6 +292,7 @@ EOF
                   env:
                     AWS_ACCESS_KEY_ID: $(AWS-ACCESS-KEY-ID)
                     AWS_SECRET_ACCESS_KEY: $(AWS-SECRET-ACCESS-KEY)
+                    APP_VALUES_YAML: $(APP2-VALUES-YAML)
 
   ############################################################################
   # STAGE 4: SMOKE TEST
