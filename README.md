@@ -26,56 +26,221 @@ This repository delivers a **production-grade, enterprise DevSecOps** solution f
 
 ---
 
-## Architecture Diagram
+## Architecture Diagrams
+
+> Three focused diagrams are provided below — each explaining a different layer of the system.
+
+---
+
+### Diagram 1 — Network Topology (End-to-End Traffic Flow)
+
+```mermaid
+flowchart LR
+    %% ── Styles ──────────────────────────────────────────────────────────────
+    classDef internet  fill:#1a1a2e,stroke:#e94560,color:#fff,stroke-width:2px
+    classDef hubvpc    fill:#1e3a5f,stroke:#4da6ff,color:#fff,stroke-width:2px
+    classDef tgw       fill:#3b1f6e,stroke:#b68fff,color:#fff,stroke-width:2px
+    classDef spokevpc  fill:#1a3a2a,stroke:#4caf82,color:#fff,stroke-width:2px
+    classDef eks       fill:#0f2a1a,stroke:#66bb6a,color:#fff,stroke-width:2px
+    classDef istio     fill:#0d2b3e,stroke:#29b6f6,color:#fff,stroke-width:2px
+    classDef pod       fill:#3e2000,stroke:#ffa726,color:#fff,stroke-width:2px
+    classDef sg        fill:#4a1010,stroke:#ef5350,color:#fff,stroke-width:1px,stroke-dasharray:4
+
+    %% ── Nodes ───────────────────────────────────────────────────────────────
+    USER(["👤 Internet User"])
+
+    subgraph HUB["🌐  Hub VPC — 10.0.0.0/16"]
+        IGW["🔌 Internet\nGateway"]
+        ALB_SG["🛡️ ALB Security Group\n✅ 0.0.0.0/0 → 80, 443\n❌ all other ports blocked"]
+        ALB["⚖️ Application Load\nBalancer\nport 80 / 443"]
+    end
+
+    subgraph TGW_BOX["🔀  AWS Transit Gateway"]
+        TGW["Transit Gateway\nASN 64512"]
+        RT_HUB["📋 RT: Hub\nlearns Spoke 10.1.0.0/16"]
+        RT_SPOKE["📋 RT: Spoke\nlearns Hub 10.0.0.0/16"]
+    end
+
+    subgraph SPOKE["🔒  Spoke VPC — 10.1.0.0/16  ❌ No IGW · No NAT"]
+        NODE_SG["🛡️ Node Security Group\n✅ ONLY Hub CIDR 10.0.0.0/16\n❌ No internet ingress"]
+
+        subgraph CLUSTER["☸️  Amazon EKS Cluster"]
+            ISTIO_GW["🌐 Istio Ingress\nGateway\nport 80/443"]
+            VS["🔀 Istio VirtualService\n/app1 → app1-svc\n/app2 → app2-svc"]
+            APP1["🐳 app1 Pods\nnginx:1.27-alpine\n× 2 replicas"]
+            APP2["🐳 app2 Pods\nnginx:1.27-alpine\n× 2 replicas"]
+        end
+    end
+
+    %% ── Traffic Flow ─────────────────────────────────────────────────────────
+    USER       -->|"① HTTP/HTTPS"| IGW
+    IGW        -->|"② hits SG"| ALB_SG
+    ALB_SG     -->|"③ allowed"| ALB
+    ALB        -->|"④ IP target\n10.1.x.x"| TGW
+    TGW        --- RT_HUB
+    TGW        --- RT_SPOKE
+    RT_SPOKE   -->|"⑤ route\n10.1.0.0/16"| NODE_SG
+    NODE_SG    -->|"⑥ allowed\n(Hub CIDR)"| ISTIO_GW
+    ISTIO_GW   -->|"⑦ Gateway CRD\nmatch all hosts"| VS
+    VS         -->|"⑧ /app1"| APP1
+    VS         -->|"⑧ /app2"| APP2
+
+    %% ── Apply styles ─────────────────────────────────────────────────────────
+    class USER internet
+    class IGW,ALB_SG,ALB hubvpc
+    class TGW,RT_HUB,RT_SPOKE tgw
+    class NODE_SG sg
+    class ISTIO_GW istio
+    class VS istio
+    class APP1,APP2 pod
+```
+
+---
+
+### Diagram 2 — Istio Service Mesh Routing Detail
 
 ```mermaid
 flowchart TD
-    User(["👤 Internet User"])
+    classDef gw   fill:#0d2b3e,stroke:#29b6f6,color:#fff,stroke-width:2px
+    classDef vs   fill:#1a237e,stroke:#7986cb,color:#fff,stroke-width:2px
+    classDef dr   fill:#1b2a1b,stroke:#66bb6a,color:#fff,stroke-width:1px,stroke-dasharray:3
+    classDef svc  fill:#263238,stroke:#90a4ae,color:#fff,stroke-width:2px
+    classDef pod  fill:#3e2000,stroke:#ffa726,color:#fff,stroke-width:2px
 
-    subgraph HubVPC["🌐 Hub VPC — 10.0.0.0/16 (Public)"]
-        IGW["Internet Gateway"]
-        ALB["Application Load Balancer\n(internet-facing, port 80/443)"]
-        ALB_SG["ALB Security Group\n✅ 0.0.0.0/0 → 80, 443"]
+    ALB(["⚖️ ALB (from Hub VPC)\nHTTP GET /app1/ or /app2/"])
+
+    GW["🌐 Istio Gateway CRD\nnamespace: istio-system\nport: 80 · selector: istio=ingressgateway\nhosts: *"]
+
+    VS1["📜 VirtualService: app1-vs\nmatch: prefix /app1\nrewrite URI → /\ntimeout: 30s · retries: 3"]
+    VS2["📜 VirtualService: app2-vs\nmatch: prefix /app2\nrewrite URI → /\ntimeout: 30s · retries: 3"]
+
+    DR1["🔒 DestinationRule: app1-dr\nmTLS: ISTIO_MUTUAL\ncircuit-break: 5 errors / 30s\nmaxEjection: 50%"]
+    DR2["🔒 DestinationRule: app2-dr\nmTLS: ISTIO_MUTUAL\ncircuit-break: 5 errors / 30s\nmaxEjection: 50%"]
+
+    SVC1["🔧 Service: app1-service\nClusterIP · port 80"]
+    SVC2["🔧 Service: app2-service\nClusterIP · port 80"]
+
+    subgraph APP1_PODS["app1 Pods  (× 2 min, × 10 max via HPA)"]
+        P1A["🐳 app1-pod-A\nnginx sidecar ⇌ envoy"]
+        P1B["🐳 app1-pod-B\nnginx sidecar ⇌ envoy"]
     end
 
-    subgraph TGW["🔀 AWS Transit Gateway"]
-        TGW_RT_HUB["TGW Route Table — Hub\nPropagates: Spoke CIDR"]
-        TGW_RT_SPOKE["TGW Route Table — Spoke\nPropagates: Hub CIDR"]
+    subgraph APP2_PODS["app2 Pods  (× 2 min, × 10 max via HPA)"]
+        P2A["🐳 app2-pod-A\nnginx sidecar ⇌ envoy"]
+        P2B["🐳 app2-pod-B\nnginx sidecar ⇌ envoy"]
     end
 
-    subgraph SpokeVPC["🔒 Spoke VPC — 10.1.0.0/16 (Private Only)"]
-        subgraph EKS["☸️ Amazon EKS Cluster"]
-            ISTIO_GW["Istio Ingress Gateway\n(NLB — internal)"]
-            subgraph IstioMesh["Istio Service Mesh (mTLS)"]
-                VS["VirtualService\n/app1 → app1-svc\n/app2 → app2-svc"]
-                APP1["🐳 app1 Pods\n(nginx:1.27-alpine)\n× 2 replicas"]
-                APP2["🐳 app2 Pods\n(nginx:1.27-alpine)\n× 2 replicas"]
-            end
-        end
-        NODE_SG["Node Security Group\n✅ Hub CIDR ONLY → all ports\n❌ No direct internet"]
-    end
+    ALB   --> GW
+    GW    -->|"/app1 prefix"| VS1
+    GW    -->|"/app2 prefix"| VS2
+    VS1   --> DR1 --> SVC1
+    VS2   --> DR2 --> SVC2
+    SVC1  --> P1A & P1B
+    SVC2  --> P2A & P2B
 
-    User -->|"HTTPS/HTTP"| IGW
-    IGW --> ALB_SG --> ALB
-    ALB -->|"IP Target (Spoke CIDR)"| TGW
-    TGW --> TGW_RT_HUB & TGW_RT_SPOKE
-    TGW_RT_SPOKE -->|"Route: 10.0.0.0/16 via TGW"| NODE_SG
-    NODE_SG --> ISTIO_GW
-    ISTIO_GW --> VS
-    VS -->|"/app1"| APP1
-    VS -->|"/app2"| APP2
+    class GW gw
+    class VS1,VS2 vs
+    class DR1,DR2 dr
+    class SVC1,SVC2 svc
+    class P1A,P1B,P2A,P2B pod
 ```
+
+---
+
+### Diagram 3 — CI/CD Pipeline Flow (Azure DevOps)
+
+```mermaid
+flowchart TD
+    classDef trigger fill:#1a1a2e,stroke:#e94560,color:#fff,stroke-width:2px
+    classDef scan    fill:#4a1010,stroke:#ef5350,color:#fff,stroke-width:2px
+    classDef tf      fill:#3b1f6e,stroke:#b68fff,color:#fff,stroke-width:2px
+    classDef deploy  fill:#1e3a5f,stroke:#4da6ff,color:#fff,stroke-width:2px
+    classDef gate    fill:#3e2000,stroke:#ffa726,color:#fff,stroke-width:3px
+    classDef smoke   fill:#1a3a2a,stroke:#4caf82,color:#fff,stroke-width:2px
+    classDef fail    fill:#4a1010,stroke:#ef5350,color:#fff,stroke-width:2px,stroke-dasharray:5
+
+    %% ════════════════════════════════════════════════
+    %% PIPELINE 1 — TERRAFORM
+    %% ════════════════════════════════════════════════
+
+    subgraph TF_PIPE["📦  Pipeline 1 — terraform-ci-cd.yaml  (triggers on terraform/**)"]
+        T0(["🔀 Git Push\nfeature/* or main"])
+        T1["🔐 Gitleaks\nSecrets Scan\n.gitleaks.toml"]
+        T2["🔍 tfsec\nTerraform SAST\nMIN severity: HIGH"]
+        T3["✅ terraform fmt\n+ validate\n-backend=false"]
+        T4["📋 terraform plan\n-out=tfplan artifact\nS3 backend init"]
+        T5{{"🔑 APPROVAL GATE\nmanual review\n(main branch only)"}}
+        T6["🚀 terraform apply\n-auto-approve\n-input=false"]
+        T7["📤 Publish Outputs\ntf-outputs.json artifact"]
+        T_FAIL(["❌ Pipeline BLOCKED\nsecurity issue found"])
+
+        T0 --> T1 & T2
+        T1 -->|"clean"| T3
+        T2 -->|"no HIGH findings"| T3
+        T1 -->|"secrets found"| T_FAIL
+        T2 -->|"HIGH+ found"| T_FAIL
+        T3 --> T4
+        T4 --> T5
+        T5 -->|"✅ approved"| T6
+        T5 -->|"❌ rejected"| T_FAIL
+        T6 --> T7
+    end
+
+    %% ════════════════════════════════════════════════
+    %% PIPELINE 2 — APP DEPLOY
+    %% ════════════════════════════════════════════════
+
+    subgraph APP_PIPE["🚢  Pipeline 2 — app-ci-cd.yaml  (triggers on kubernetes/**)"]
+        A0(["🔀 Git Push\nkubernetes/**"])
+        A1["🔐 Gitleaks\nSecrets Scan"]
+        A2["🧹 helm lint\nmicroservice chart\n--strict"]
+        A3["📡 kubectl apply\ngateway.yaml\nvirtualservice.yaml"]
+        A4["📦 helm diff\napp1 (drift check)"]
+        A5["🚀 helm upgrade\n--install app1\n--atomic --wait"]
+        A6["📦 helm diff\napp2 (drift check)"]
+        A7["🚀 helm upgrade\n--install app2\n--atomic --wait"]
+        A8["🧪 Smoke Test\ncurl /app1 + /app2\n5 retries × 15s"]
+        A_FAIL(["❌ Pipeline BLOCKED"])
+
+        A0 --> A1 & A2
+        A1 -->|"clean"| A3
+        A2 -->|"lint OK"| A3
+        A1 -->|"secrets"| A_FAIL
+        A2 -->|"lint fail"| A_FAIL
+        A3 --> A4 --> A5
+        A5 --> A6 --> A7
+        A7 --> A8
+        A8 -->|"200 OK"| DONE(["✅ Deployment\nSuccessful"])
+        A8 -->|"failed"| A_FAIL
+    end
+
+    class T0,A0 trigger
+    class T1,T2,A1,A2 scan
+    class T3,T4,T6,T7 tf
+    class A3,A4,A5,A6,A7 deploy
+    class T5 gate
+    class A8,DONE smoke
+    class T_FAIL,A_FAIL fail
+```
+
+---
 
 ### Traffic Flow (Step-by-Step)
 
-1. **User → IGW → ALB**: HTTP/HTTPS hits the ALB Security Group (allows `0.0.0.0/0:80,443`). ALB is in Hub public subnets.
-2. **ALB → TGW**: ALB forwards to the Istio Ingress Gateway **IP target** in the Spoke VPC. The Hub route table routes `10.1.0.0/16` via TGW.
-3. **TGW → Spoke VPC**: TGW route table for Spoke knows the Hub CIDR via propagation. Return traffic flows back via the same path.
-4. **Node SG → Istio GW**: EKS node security group only permits ingress from Hub VPC CIDR (`10.0.0.0/16`) — no other inbound is allowed.
-5. **Istio Gateway → VirtualService**: The Istio Gateway CRD accepts the traffic, and the VirtualService routes based on URI prefix (`/app1` or `/app2`).
-6. **VirtualService → Pods**: mTLS-encrypted traffic reaches the nginx pods. DestinationRules enforce circuit-breaking and connection pool limits.
+| Step | From | To | Protocol / Port | Security Check |
+|---|---|---|---|---|
+| ① | Internet User | Internet Gateway | HTTP/HTTPS | — |
+| ② | IGW | ALB Security Group | TCP 80, 443 | SG allows `0.0.0.0/0` |
+| ③ | ALB SG | ALB (Hub VPC) | TCP 80, 443 | Implicit allow |
+| ④ | ALB | TGW (IP target) | TCP 80 | Route table `10.1.0.0/16 → TGW` |
+| ⑤ | TGW | EKS Node SG | TCP 80 | RT propagation Hub↔Spoke |
+| ⑥ | Node SG | Istio Ingress GW | TCP 80 | SG: Hub CIDR only `10.0.0.0/16` |
+| ⑦ | Istio GW | VirtualService | Internal | Gateway CRD match `hosts: *` |
+| ⑧ | VirtualService | app1 / app2 Pods | mTLS / TCP | DestinationRule `ISTIO_MUTUAL` |
 
 ---
+
+
 
 ## Repository Structure
 
