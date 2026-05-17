@@ -115,3 +115,30 @@ output "aws_region" {
   description = "AWS Region"
   value       = var.aws_region
 }
+
+# ─── Remote Backend ───────────────────────────────────────────────────────────
+
+output "tfstate_bucket_name" {
+  description = "S3 bucket name storing Terraform remote state"
+  value       = aws_s3_bucket.tfstate.id
+}
+
+output "tfstate_bucket_arn" {
+  description = "ARN of the Terraform state S3 bucket"
+  value       = aws_s3_bucket.tfstate.arn
+}
+
+output "tfstate_bucket_versioning" {
+  description = "Versioning status of the Terraform state bucket"
+  value       = aws_s3_bucket_versioning.tfstate.versioning_configuration[0].status
+}
+
+output "tfstate_dynamodb_table" {
+  description = "DynamoDB table name used for Terraform state locking"
+  value       = aws_dynamodb_table.tfstate_lock.name
+}
+
+output "backend_init_command" {
+  description = "Command to re-initialise Terraform with the S3 backend"
+  value       = "terraform init -reconfigure -backend-config=backend.hcl"
+}

@@ -21,14 +21,19 @@ terraform {
     }
   }
 
-  # ── Remote state backend (uncomment and configure for real environments) ───
-  # backend "s3" {
-  #   bucket         = "your-terraform-state-bucket"
-  #   key            = "hub-spoke/terraform.tfstate"
-  #   region         = "ap-southeast-1"
-  #   encrypt        = true
-  #   dynamodb_table = "terraform-state-lock"
-  # }
+  # ── Remote state backend — S3 + DynamoDB locking ─────────────────────────
+  # Bucket and DynamoDB table are provisioned by terraform/backend.tf (bootstrap).
+  # Values are injected at init-time via -backend-config flags or the ADO pipeline.
+  # Run `terraform init -reconfigure -backend-config=backend.hcl` to switch backends.
+  backend "s3" {
+    bucket         = "hubspoke-tfstate-ap-southeast-1"   # set via -backend-config in CI
+    key            = "hub-spoke/terraform.tfstate"
+    region         = "ap-southeast-1"
+    encrypt        = true
+    dynamodb_table = "hubspoke-tfstate-lock"
+    # Optional: use a KMS key ARN for customer-managed encryption
+    # kms_key_id   = "arn:aws:kms:ap-southeast-1:ACCOUNT_ID:key/KEY_ID"
+  }
 }
 
 provider "aws" {
