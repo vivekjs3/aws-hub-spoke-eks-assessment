@@ -1,0 +1,56 @@
+################################################################################
+# templates/configmap.yaml — Nginx Configuration
+################################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-nginx-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}
+    release: {{ .Release.Name }}
+data:
+  default.conf: |
+    server {
+        listen 80;
+        server_name _;
+
+        # Security headers
+        add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+        # Health check endpoint (used by readiness/liveness probes and ALB)
+        location /healthz {
+            access_log off;
+            return 200 'OK\n';
+            add_header Content-Type text/plain;
+        }
+
+        # Istio readiness endpoint
+        location /healthz/ready {
+            access_log off;
+            return 200 'OK\n';
+            add_header Content-Type text/plain;
+        }
+
+        # Main application endpoint
+        location / {
+            root /usr/share/nginx/html;
+            index index.html index.htm;
+            try_files $uri $uri/ =404;
+        }
+
+        # Error pages
+        error_page 404 /404.html;
+        error_page 500 502 503 504 /50x.html;
+
+        location = /50x.html {
+            root /usr/share/nginx/html;
+        }
+    }
+  {{- if .Values.customNginxConfig }}
+  custom.conf: |
+    {{ .Values.customNginxConfig | nindent 4 }}
+  {{- end }}

@@ -1,0 +1,163 @@
+################################################################################
+# terraform-ci-cd.yaml — Azure DevOps Pipeline: Terraform Infrastructure
+# Variable Groups Required:
+#   - "aws-credentials"  → AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
+#   - "tf-backend"       → TF_BACKEND_BUCKET, TF_BACKEND_KEY, TF_BACKEND_REGION
+################################################################################
+
+trigger:
+  branches:
+    include: [feature/*, main]
+  paths:
+    include: [terraform/**]
+
+pr:
+  branches:
+    include: [main]
+  paths:
+    include: [terraform/**]
+
+variables:
+  - group: aws-credentials
+  - group: tf-backend
+  - name: TF_VERSION
+    value: "1.8.1"
+  - name: WORKING_DIR
+    value: "$(Build.SourcesDirectory)/terraform"
+  - name: PLAN_FILE
+    value: "$(Build.ArtifactStagingDirectory)/tfplan"
+
+pool:
+  vmImage: "ubuntu-22.04"
+
+stages:
+  # ─── Stage 1: Security Scan (Gitleaks + tfsec) ─────────────────────────────
+  - stage: SecurityScan
+    displayName: "Security Scan"
+    jobs:
+      - job: Gitleaks
+        displayName: "Gitleaks Secrets Detection"
+        steps:
+          - checkout: self
+            fetchDepth: 0
+          - script: |
+              curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz \
+                | tar -xz -C /usr/local/bin gitleaks
+              gitleaks detect \
+                --source="$(Build.SourcesDirectory)" \
+                --config="$(Build.SourcesDirectory)/.gitleaks.toml" \
+                --report-path="$(Build.ArtifactStagingDirectory)/gitleaks-report.json" \
+                --report-format=json \
+                --exit-code=1
+            displayName: "Gitleaks Scan"
+          - task: PublishBuildArtifacts@1
+            condition: always()
+            inputs:
+              pathToPublish: "$(Build.ArtifactStagingDirectory)/gitleaks-report.json"
+              artifactName: "security-reports"
+
+      - job: TfSec
+        displayName: "tfsec Terraform SAST"
+        steps:
+          - checkout: self
+          - script: |
+              curl -Lo /usr/local/bin/tfsec \
+                https://github.com/aquasecurity/tfsec/releases/download/v1.28.4/tfsec-linux-amd64
+              chmod +x /usr/local/bin/tfsec
+              tfsec $(WORKING_DIR) \
+                --format json \
+                --out $(Build.ArtifactStagingDirectory)/tfsec-report.json \
+                --minimum-severity HIGH \
+                --no-colour
+            displayName: "tfsec Scan"
+          - task: PublishBuildArtifacts@1
+            condition: always()
+            inputs:
+              pathToPublish: "$(Build.ArtifactStagingDirectory)/tfsec-report.json"
+              artifactName: "security-reports"
+
+  # ─── Stage 2: Validate ─────────────────────────────────────────────────────
+  - stage: Validate
+    displayName: "Terraform Validate"
+    dependsOn: SecurityScan
+    condition: succeeded()
+    jobs:
+      - job: TerraformValidate
+        steps:
+          - checkout: self
+          - script: |
+              wget -q https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip
+              unzip -q terraform_$(TF_VERSION)_linux_amd64.zip -d /usr/local/bin/
+              terraform fmt -check -recursive -diff
+              terraform init -backend=false
+              terraform validate
+            workingDirectory: $(WORKING_DIR)
+            displayName: "fmt + init + validate"
+
+  # ─── Stage 3: Plan ─────────────────────────────────────────────────────────
+  - stage: Plan
+    displayName: "Terraform Plan"
+    dependsOn: Validate
+    condition: succeeded()
+    jobs:
+      - job: TerraformPlan
+        steps:
+          - checkout: self
+          - script: |
+              wget -q https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip
+              unzip -q terraform_$(TF_VERSION)_linux_amd64.zip -d /usr/local/bin/
+              terraform init \
+                -backend-config="bucket=$(TF_BACKEND_BUCKET)" \
+                -backend-config="key=$(TF_BACKEND_KEY)" \
+                -backend-config="region=$(TF_BACKEND_REGION)" \
+                -backend-config="encrypt=true"
+              terraform plan -out="$(PLAN_FILE)" -var="aws_region=$(AWS_REGION)" -input=false
+            workingDirectory: $(WORKING_DIR)
+            displayName: "terraform init + plan"
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              AWS_DEFAULT_REGION: $(AWS_REGION)
+          - task: PublishBuildArtifacts@1
+            inputs:
+              pathToPublish: "$(Build.ArtifactStagingDirectory)"
+              artifactName: "terraform-plan"
+
+  # ─── Stage 4: Apply (Manual Approval Gate) ─────────────────────────────────
+  - stage: Apply
+    displayName: "Terraform Apply"
+    dependsOn: Plan
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: TerraformApply
+        environment: "production"   # Configure approval gate in ADO Environments UI
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - script: |
+                    wget -q https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip
+                    unzip -q terraform_$(TF_VERSION)_linux_amd64.zip -d /usr/local/bin/
+                  displayName: "Install Terraform"
+                - task: DownloadBuildArtifacts@1
+                  inputs:
+                    artifactName: "terraform-plan"
+                    downloadPath: "$(Build.ArtifactStagingDirectory)"
+                - script: |
+                    terraform init \
+                      -backend-config="bucket=$(TF_BACKEND_BUCKET)" \
+                      -backend-config="key=$(TF_BACKEND_KEY)" \
+                      -backend-config="region=$(TF_BACKEND_REGION)"
+                    terraform apply -auto-approve -input=false "$(PLAN_FILE)"
+                    terraform output -json > $(Build.ArtifactStagingDirectory)/tf-outputs.json
+                  workingDirectory: $(WORKING_DIR)
+                  displayName: "terraform apply"
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                    AWS_DEFAULT_REGION: $(AWS_REGION)
+                - task: PublishBuildArtifacts@1
+                  inputs:
+                    pathToPublish: "$(Build.ArtifactStagingDirectory)/tf-outputs.json"
+                    artifactName: "terraform-outputs"

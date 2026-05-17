@@ -1,0 +1,275 @@
+################################################################################
+# app-ci-cd.yaml — Azure DevOps Pipeline: App Deployment (Helm + Istio)
+# Variable Groups Required:
+#   - "aws-credentials"  → AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
+#   - "eks-config"       → EKS_CLUSTER_NAME
+#   - "app-config"       → APP1_IMAGE_TAG, APP2_IMAGE_TAG, NAMESPACE
+################################################################################
+
+trigger:
+  branches:
+    include: [feature/*, main]
+  paths:
+    include:
+      - kubernetes/**
+      - pipelines/app-ci-cd.yaml
+
+pr:
+  branches:
+    include: [main]
+  paths:
+    include: [kubernetes/**]
+
+variables:
+  - group: aws-credentials
+  - group: eks-config
+  - group: app-config
+  - name: HELM_VERSION
+    value: "3.14.4"
+  - name: KUBECTL_VERSION
+    value: "1.29.0"
+  - name: CHART_PATH
+    value: "$(Build.SourcesDirectory)/kubernetes/helm/microservice"
+  - name: ISTIO_PATH
+    value: "$(Build.SourcesDirectory)/kubernetes/istio"
+  - name: NAMESPACE
+    value: "default"
+
+pool:
+  vmImage: "ubuntu-22.04"
+
+stages:
+  # ─── Stage 1: Security Scan ────────────────────────────────────────────────
+  - stage: SecurityScan
+    displayName: "Security Scan (Gitleaks + Helm Lint)"
+    jobs:
+      - job: Gitleaks
+        displayName: "Gitleaks Secrets Detection"
+        steps:
+          - checkout: self
+            fetchDepth: 0
+          - script: |
+              curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz \
+                | tar -xz -C /usr/local/bin gitleaks
+              gitleaks detect \
+                --source="$(Build.SourcesDirectory)" \
+                --config="$(Build.SourcesDirectory)/.gitleaks.toml" \
+                --report-path="$(Build.ArtifactStagingDirectory)/gitleaks-report.json" \
+                --report-format=json \
+                --exit-code=1
+            displayName: "Gitleaks Scan"
+          - task: PublishBuildArtifacts@1
+            condition: always()
+            inputs:
+              pathToPublish: "$(Build.ArtifactStagingDirectory)/gitleaks-report.json"
+              artifactName: "security-reports"
+
+      - job: HelmLint
+        displayName: "Helm Lint"
+        steps:
+          - checkout: self
+          - script: |
+              curl -fsSL https://get.helm.sh/helm-v$(HELM_VERSION)-linux-amd64.tar.gz | tar -xz
+              sudo mv linux-amd64/helm /usr/local/bin/
+              helm lint $(CHART_PATH) --values $(CHART_PATH)/values.yaml --strict
+            displayName: "Helm Lint Chart"
+
+  # ─── Stage 2: Deploy Istio Config ─────────────────────────────────────────
+  - stage: DeployIstio
+    displayName: "Deploy Istio Gateway + VirtualService"
+    dependsOn: SecurityScan
+    condition: succeeded()
+    jobs:
+      - deployment: IstioConfig
+        environment: "production"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - script: |
+                    # Install kubectl
+                    curl -LO "https://dl.k8s.io/release/v$(KUBECTL_VERSION)/bin/linux/amd64/kubectl"
+                    chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+
+                    # Install AWS CLI
+                    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+                    unzip -q awscliv2.zip && sudo ./aws/install
+
+                    # Configure kubeconfig
+                    aws eks update-kubeconfig \
+                      --region $(AWS_REGION) \
+                      --name $(EKS_CLUSTER_NAME)
+                  displayName: "Setup kubectl + AWS CLI"
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                    AWS_DEFAULT_REGION: $(AWS_REGION)
+
+                - script: |
+                    # Apply Istio Gateway
+                    kubectl apply -f $(ISTIO_PATH)/gateway.yaml
+                    echo "Waiting for Gateway to be ready..."
+                    sleep 10
+
+                    # Apply VirtualService + DestinationRules
+                    kubectl apply -f $(ISTIO_PATH)/virtualservice.yaml
+
+                    # Verify
+                    kubectl get gateway -n istio-system
+                    kubectl get virtualservice -n default
+                    kubectl get destinationrule -n default
+                  displayName: "Apply Istio Gateway + VirtualService"
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+
+  # ─── Stage 3: Deploy Microservices (Helm) ─────────────────────────────────
+  - stage: DeployApps
+    displayName: "Deploy app1 + app2 via Helm"
+    dependsOn: DeployIstio
+    condition: succeeded()
+    jobs:
+      - deployment: DeployApp1
+        displayName: "Deploy app1"
+        environment: "production"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - script: |
+                    # Install tools
+                    curl -fsSL https://get.helm.sh/helm-v$(HELM_VERSION)-linux-amd64.tar.gz | tar -xz
+                    sudo mv linux-amd64/helm /usr/local/bin/
+                    curl -LO "https://dl.k8s.io/release/v$(KUBECTL_VERSION)/bin/linux/amd64/kubectl"
+                    chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+                    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+                    unzip -q awscliv2.zip && sudo ./aws/install
+                    aws eks update-kubeconfig --region $(AWS_REGION) --name $(EKS_CLUSTER_NAME)
+                  displayName: "Setup Tools"
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                    AWS_DEFAULT_REGION: $(AWS_REGION)
+
+                - script: |
+                    # Helm diff (drift detection — install plugin if needed)
+                    helm plugin install https://github.com/databus23/helm-diff || true
+
+                    # Show diff before upgrade
+                    helm diff upgrade app1 $(CHART_PATH) \
+                      --namespace $(NAMESPACE) \
+                      --set appName=app1 \
+                      --set image.tag=$(APP1_IMAGE_TAG) \
+                      --set replicaCount=2 \
+                      || true   # diff exits non-zero when changes exist
+
+                    # Deploy app1
+                    helm upgrade --install app1 $(CHART_PATH) \
+                      --namespace $(NAMESPACE) \
+                      --create-namespace \
+                      --set appName=app1 \
+                      --set image.repository=nginx \
+                      --set image.tag=$(APP1_IMAGE_TAG) \
+                      --set replicaCount=2 \
+                      --set service.type=ClusterIP \
+                      --atomic \
+                      --timeout 5m \
+                      --wait
+
+                    # Verify rollout
+                    kubectl rollout status deployment/app1 -n $(NAMESPACE) --timeout=5m
+                  displayName: "Helm Deploy app1"
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+
+      - deployment: DeployApp2
+        displayName: "Deploy app2"
+        environment: "production"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+                - script: |
+                    curl -fsSL https://get.helm.sh/helm-v$(HELM_VERSION)-linux-amd64.tar.gz | tar -xz
+                    sudo mv linux-amd64/helm /usr/local/bin/
+                    curl -LO "https://dl.k8s.io/release/v$(KUBECTL_VERSION)/bin/linux/amd64/kubectl"
+                    chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+                    curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+                    unzip -q awscliv2.zip && sudo ./aws/install
+                    aws eks update-kubeconfig --region $(AWS_REGION) --name $(EKS_CLUSTER_NAME)
+                  displayName: "Setup Tools"
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                    AWS_DEFAULT_REGION: $(AWS_REGION)
+
+                - script: |
+                    helm plugin install https://github.com/databus23/helm-diff || true
+
+                    helm diff upgrade app2 $(CHART_PATH) \
+                      --namespace $(NAMESPACE) \
+                      --set appName=app2 \
+                      --set image.tag=$(APP2_IMAGE_TAG) \
+                      || true
+
+                    helm upgrade --install app2 $(CHART_PATH) \
+                      --namespace $(NAMESPACE) \
+                      --create-namespace \
+                      --set appName=app2 \
+                      --set image.repository=nginx \
+                      --set image.tag=$(APP2_IMAGE_TAG) \
+                      --set replicaCount=2 \
+                      --set service.type=ClusterIP \
+                      --atomic \
+                      --timeout 5m \
+                      --wait
+
+                    kubectl rollout status deployment/app2 -n $(NAMESPACE) --timeout=5m
+                  displayName: "Helm Deploy app2"
+                  env:
+                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+
+  # ─── Stage 4: Smoke Test ───────────────────────────────────────────────────
+  - stage: SmokeTest
+    displayName: "Smoke Test"
+    dependsOn: DeployApps
+    condition: succeeded()
+    jobs:
+      - job: SmokeTest
+        steps:
+          - checkout: self
+          - script: |
+              curl -LO "https://dl.k8s.io/release/v$(KUBECTL_VERSION)/bin/linux/amd64/kubectl"
+              chmod +x kubectl && sudo mv kubectl /usr/local/bin/
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+              unzip -q awscliv2.zip && sudo ./aws/install
+              aws eks update-kubeconfig --region $(AWS_REGION) --name $(EKS_CLUSTER_NAME)
+
+              # Verify pods are Running
+              kubectl get pods -n $(NAMESPACE) -l release=app1
+              kubectl get pods -n $(NAMESPACE) -l release=app2
+
+              # Get Istio Ingress Gateway External IP
+              INGRESS_IP=$(kubectl get svc istio-ingressgateway -n istio-system \
+                -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || \
+                kubectl get svc istio-ingressgateway -n istio-system \
+                -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+              echo "Istio Ingress: $INGRESS_IP"
+
+              # Curl test (retry up to 5 times)
+              for i in 1 2 3 4 5; do
+                curl -sf "http://$INGRESS_IP/app1/" && echo "app1 OK" && break || sleep 15
+              done
+              for i in 1 2 3 4 5; do
+                curl -sf "http://$INGRESS_IP/app2/" && echo "app2 OK" && break || sleep 15
+              done
+            displayName: "Smoke Test Endpoints"
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+              AWS_DEFAULT_REGION: $(AWS_REGION)

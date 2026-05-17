@@ -1,0 +1,30 @@
+apiVersion: v2
+name: microservice
+description: |
+  Enterprise-grade generic Helm chart for Nginx-based microservices.
+  Supports readiness/liveness/startup probes, HPA, PDB, ResourceQuota,
+  and Istio sidecar injection. Used for app1 and app2 in the Hub-Spoke assessment.
+
+type: application
+
+# Chart version — bump on every release
+version: 1.0.0
+
+# App version tracks the deployed image tag
+appVersion: "1.27.0"
+
+keywords:
+  - microservice
+  - nginx
+  - istio
+  - eks
+  - hub-spoke
+
+maintainers:
+  - name: platform-team
+    email: platform@example.com
+
+annotations:
+  artifacthub.io/changes: |
+    - kind: added
+      description: Initial release with enterprise-grade probes, HPA, PDB, ResourceQuota

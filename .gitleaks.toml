@@ -1,0 +1,104 @@
+################################################################################
+# .gitleaks.toml — Gitleaks Configuration
+# Enterprise-grade secrets detection for the Hub-Spoke DevSecOps repository.
+################################################################################
+
+title = "Hub-Spoke EKS Assessment — Gitleaks Config"
+
+[extend]
+# Extend the default Gitleaks ruleset
+useDefault = true
+
+################################################################################
+# Global Allowlist
+################################################################################
+[allowlist]
+  description = "Global allowlist — safe patterns, test values, example placeholders"
+  regexes = [
+    # Generic placeholder patterns used in documentation
+    '''ACCOUNT_ID''',
+    '''YOUR_.*''',
+    '''example\.com''',
+    '''<REPLACE_.*>''',
+    '''XXXXXXXXXX''',
+    # Terraform example outputs (not real creds)
+    '''arn:aws:.*:ACCOUNT_ID:''',
+  ]
+  paths = [
+    # Exclude test fixtures and generated lock files
+    '''.*\.terraform\.lock\.hcl''',
+    '''.*_test\.go''',
+    '''.*testdata.*''',
+    '''.*\.md$''',
+  ]
+
+################################################################################
+# Custom Rules (in addition to useDefault)
+################################################################################
+
+[[rules]]
+  id          = "aws-access-key-id"
+  description = "AWS Access Key ID"
+  regex       = '''(?i)(aws_access_key_id|aws_access_key)\s*[=:]\s*['"]?(AKIA[0-9A-Z]{16})['"]?'''
+  tags        = ["aws", "credentials", "key"]
+  severity    = "CRITICAL"
+
+[[rules]]
+  id          = "aws-secret-access-key"
+  description = "AWS Secret Access Key"
+  regex       = '''(?i)(aws_secret_access_key|aws_secret_key)\s*[=:]\s*['"]?([A-Za-z0-9/+=]{40})['"]?'''
+  tags        = ["aws", "credentials", "secret"]
+  severity    = "CRITICAL"
+
+[[rules]]
+  id          = "aws-session-token"
+  description = "AWS Session Token"
+  regex       = '''(?i)(aws_session_token)\s*[=:]\s*['"]?([A-Za-z0-9/+=]{100,})['"]?'''
+  tags        = ["aws", "credentials", "token"]
+  severity    = "CRITICAL"
+
+[[rules]]
+  id          = "terraform-variable-with-secret"
+  description = "Terraform variable containing hardcoded secret"
+  regex       = '''(?i)(password|secret|token|api_key|private_key)\s*=\s*"[^"]{8,}"'''
+  tags        = ["terraform", "secret"]
+  severity    = "HIGH"
+  [rules.allowlist]
+    regexes = [
+      # Ignore references to variables (not literal values)
+      '''var\.[a-z_]+''',
+      '''data\.[a-z_]+''',
+    ]
+
+[[rules]]
+  id          = "private-key-pem"
+  description = "RSA / EC Private Key PEM"
+  regex       = '''-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----'''
+  tags        = ["key", "pem"]
+  severity    = "CRITICAL"
+
+[[rules]]
+  id          = "kubernetes-secret-manifest"
+  description = "Kubernetes Secret with base64 hardcoded data"
+  regex       = '''kind:\s+Secret[\s\S]*?data:[\s\S]*?:\s+[A-Za-z0-9+/=]{20,}'''
+  tags        = ["kubernetes", "secret"]
+  severity    = "HIGH"
+
+[[rules]]
+  id          = "azure-devops-pat"
+  description = "Azure DevOps Personal Access Token"
+  regex       = '''(?i)(azure_devops_pat|ado_token|AZDO_PAT)\s*[=:]\s*['"]?([A-Za-z0-9]{52})['"]?'''
+  tags        = ["azure", "devops", "pat"]
+  severity    = "CRITICAL"
+
+[[rules]]
+  id          = "generic-api-key"
+  description = "Generic API Key in environment or config"
+  regex       = '''(?i)(api_key|apikey|api-key)\s*[=:]\s*['"]?[A-Za-z0-9\-_]{20,}['"]?'''
+  tags        = ["api", "key"]
+  severity    = "MEDIUM"
+  [rules.allowlist]
+    regexes = [
+      '''var\.[a-z_]+''',
+      '''REPLACE_ME''',
+    ]

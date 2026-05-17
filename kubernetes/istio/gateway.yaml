@@ -1,0 +1,42 @@
+################################################################################
+# gateway.yaml — Istio Gateway CRD
+# Configures the Istio Ingress Gateway to accept HTTP/HTTPS traffic.
+# Traffic arrives via: User → ALB (Hub) → TGW → Istio IngressGateway (Spoke)
+################################################################################
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: hub-spoke-gateway
+  namespace: istio-system
+  labels:
+    app: hub-spoke-gateway
+    version: v1
+    managed-by: gitops
+spec:
+  # Binds to the Istio Ingress Gateway pods
+  selector:
+    istio: ingressgateway
+
+  servers:
+    # ── HTTP (port 80) ───────────────────────────────────────────────────────
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "*"
+      # In production, redirect HTTP → HTTPS using:
+      # tls:
+      #   httpsRedirect: true
+
+    # ── HTTPS (port 443) ─────────────────────────────────────────────────────
+    # Uncomment when TLS certificate is available (ACM / cert-manager)
+    # - port:
+    #     number: 443
+    #     name: https
+    #     protocol: HTTPS
+    #   tls:
+    #     mode: SIMPLE
+    #     credentialName: hub-spoke-tls-secret   # Kubernetes Secret with TLS cert/key
+    #   hosts:
+    #     - "*"

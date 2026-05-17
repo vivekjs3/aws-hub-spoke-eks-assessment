@@ -1,0 +1,148 @@
+################################################################################
+# virtualservice.yaml — Istio VirtualService CRDs
+# URI-based path routing for two microservices (app1 and app2).
+# Traffic flow: Gateway → VirtualService → Kubernetes Service → Pod
+################################################################################
+
+# ─── App1 VirtualService ──────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: app1-vs
+  namespace: default
+  labels:
+    app: app1
+    version: v1
+    managed-by: gitops
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - istio-system/hub-spoke-gateway
+  http:
+    # ── /app1 path routing ───────────────────────────────────────────────────
+    - name: app1-route
+      match:
+        - uri:
+            prefix: "/app1"
+      rewrite:
+        uri: "/"
+      route:
+        - destination:
+            host: app1-service.default.svc.cluster.local
+            port:
+              number: 80
+          weight: 100
+      # Resilience policies
+      timeout: 30s
+      retries:
+        attempts: 3
+        perTryTimeout: 10s
+        retryOn: "connect-failure,refused-stream,unavailable,cancelled,retriable-4xx"
+      # CORS policy for cross-origin requests
+      corsPolicy:
+        allowOrigins:
+          - exact: "*"
+        allowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        allowHeaders:
+          - authorization
+          - content-type
+        maxAge: "24h"
+
+---
+# ─── App2 VirtualService ──────────────────────────────────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: app2-vs
+  namespace: default
+  labels:
+    app: app2
+    version: v1
+    managed-by: gitops
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - istio-system/hub-spoke-gateway
+  http:
+    # ── /app2 path routing ───────────────────────────────────────────────────
+    - name: app2-route
+      match:
+        - uri:
+            prefix: "/app2"
+      rewrite:
+        uri: "/"
+      route:
+        - destination:
+            host: app2-service.default.svc.cluster.local
+            port:
+              number: 80
+          weight: 100
+      timeout: 30s
+      retries:
+        attempts: 3
+        perTryTimeout: 10s
+        retryOn: "connect-failure,refused-stream,unavailable,cancelled,retriable-4xx"
+      corsPolicy:
+        allowOrigins:
+          - exact: "*"
+        allowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        allowHeaders:
+          - authorization
+          - content-type
+        maxAge: "24h"
+
+---
+# ─── DestinationRule — App1 (circuit breaker + mTLS) ─────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: app1-dr
+  namespace: default
+spec:
+  host: app1-service.default.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 100
+        http2MaxRequests: 1000
+    outlierDetection:
+      consecutiveGatewayErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+    tls:
+      mode: ISTIO_MUTUAL  # Enable mTLS within the mesh
+
+---
+# ─── DestinationRule — App2 (circuit breaker + mTLS) ─────────────────────────
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: app2-dr
+  namespace: default
+spec:
+  host: app2-service.default.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 100
+        http2MaxRequests: 1000
+    outlierDetection:
+      consecutiveGatewayErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+    tls:
+      mode: ISTIO_MUTUAL

@@ -1,0 +1,149 @@
+################################################################################
+# values.yaml — Default values for the microservice Helm chart
+# Override per-release: helm upgrade app1 ./microservice -f app1-values.yaml
+################################################################################
+
+# ── App Identity ───────────────────────────────────────────────────────────────
+appName: microservice
+environment: prod
+
+# ── Image ─────────────────────────────────────────────────────────────────────
+image:
+  repository: nginx
+  tag: "1.27.0-alpine"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# ── Replicas ──────────────────────────────────────────────────────────────────
+replicaCount: 2
+
+# ── Service ───────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 80
+  protocol: TCP
+  annotations: {}
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "256Mi"
+
+# ── Probes ────────────────────────────────────────────────────────────────────
+livenessProbe:
+  enabled: true
+  httpGet:
+    path: /
+    port: 80
+  initialDelaySeconds: 15
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+readinessProbe:
+  enabled: true
+  httpGet:
+    path: /
+    port: 80
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+  successThreshold: 1
+
+startupProbe:
+  enabled: true
+  httpGet:
+    path: /
+    port: 80
+  initialDelaySeconds: 0
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30  # 30 * 10s = 5 minutes max startup time
+  successThreshold: 1
+
+# ── Horizontal Pod Autoscaler ─────────────────────────────────────────────────
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# ── Pod Disruption Budget ─────────────────────────────────────────────────────
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  # maxUnavailable: 1   # Use either minAvailable or maxUnavailable
+
+# ── Resource Quota (applied to the namespace) ─────────────────────────────────
+resourceQuota:
+  enabled: true
+  hard:
+    requests.cpu: "2"
+    requests.memory: "2Gi"
+    limits.cpu: "4"
+    limits.memory: "4Gi"
+    pods: "20"
+    services: "10"
+
+# ── Security Context ──────────────────────────────────────────────────────────
+podSecurityContext:
+  runAsNonRoot: false  # nginx default image runs as root; set true with custom image
+  fsGroup: 101
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false  # nginx needs to write /tmp and /var/run
+  capabilities:
+    drop:
+      - ALL
+    add:
+      - NET_BIND_SERVICE
+
+# ── Istio ─────────────────────────────────────────────────────────────────────
+istio:
+  enabled: true
+  sidecarInjection: true  # Annotation: sidecar.istio.io/inject: "true"
+
+# ── Node Selector / Tolerations / Affinity ────────────────────────────────────
+nodeSelector: {}
+
+tolerations: []
+
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - microservice
+          topologyKey: kubernetes.io/hostname
+
+# ── Extra Labels & Annotations ────────────────────────────────────────────────
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "80"
+  prometheus.io/path: "/metrics"
+
+podLabels: {}
+
+# ── Nginx custom config (optional) ───────────────────────────────────────────
+customNginxConfig: ""
+# Example:
+# customNginxConfig: |
+#   server {
+#     listen 80;
+#     location /healthz { return 200 'OK'; }
+#   }

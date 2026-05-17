@@ -1,0 +1,59 @@
+# ─── Terraform ────────────────────────────────────────────────────────────────
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+*.tfvars
+!example.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# ─── Terraform plan output (published as artifact, not committed) ─────────────
+tfplan
+
+# ─── Secrets / Credentials ────────────────────────────────────────────────────
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+.env
+.env.*
+!.env.example
+secrets/
+*secret*.yaml
+*secret*.json
+kubeconfig
+kubeconfig.*
+
+# ─── Helm ─────────────────────────────────────────────────────────────────────
+*.tgz
+charts/
+
+# ─── OS / Editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+*.iml
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ─── Python (for any helper scripts) ─────────────────────────────────────────
+__pycache__/
+*.pyc
+.venv/
+
+# ─── Node (for any helper scripts) ───────────────────────────────────────────
+node_modules/
