@@ -1,9 +1,21 @@
 ################################################################################
 # app-ci-cd.yaml — Azure DevOps Pipeline: App Deployment (Helm + Istio)
-# Variable Groups Required:
-#   - "aws-credentials"  → AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
-#   - "eks-config"       → EKS_CLUSTER_NAME
-#   - "app-config"       → APP1_IMAGE_TAG, APP2_IMAGE_TAG, NAMESPACE
+#
+# SECRET MANAGEMENT: Azure Key Vault (AzureKeyVault@2 task)
+# ─────────────────────────────────────────────────────────
+# All sensitive values are fetched from Azure Key Vault at runtime.
+# NO secrets are stored in Variable Groups or plain pipeline variables.
+#
+# Required Azure Key Vault secrets:
+#   AWS-ACCESS-KEY-ID       → AWS IAM access key
+#   AWS-SECRET-ACCESS-KEY   → AWS IAM secret key
+#   AWS-REGION              → e.g. ap-southeast-1
+#   EKS-CLUSTER-NAME        → EKS cluster name
+#   APP1-IMAGE-TAG          → Nginx image tag for app1
+#   APP2-IMAGE-TAG          → Nginx image tag for app2
+#
+# Required non-secret Variable Group (plain values only):
+#   - "pipeline-config"  → AKV_NAME, AZURE_SERVICE_CONNECTION, NAMESPACE
 ################################################################################
 
 trigger:
@@ -21,9 +33,8 @@ pr:
     include: [kubernetes/**]
 
 variables:
-  - group: aws-credentials
-  - group: eks-config
-  - group: app-config
+  # ── Non-secret pipeline config only ────────────────────────────────────────
+  - group: pipeline-config            # AKV_NAME, AZURE_SERVICE_CONNECTION, NAMESPACE
   - name: HELM_VERSION
     value: "3.14.4"
   - name: KUBECTL_VERSION
@@ -32,14 +43,14 @@ variables:
     value: "$(Build.SourcesDirectory)/kubernetes/helm/microservice"
   - name: ISTIO_PATH
     value: "$(Build.SourcesDirectory)/kubernetes/istio"
-  - name: NAMESPACE
-    value: "default"
 
 pool:
   vmImage: "ubuntu-22.04"
 
 stages:
-  # ─── Stage 1: Security Scan ────────────────────────────────────────────────
+  ############################################################################
+  # STAGE 1: SECURITY SCAN — Gitleaks + Helm lint (no secrets needed)
+  ############################################################################
   - stage: SecurityScan
     displayName: "Security Scan (Gitleaks + Helm Lint)"
     jobs:
@@ -74,19 +85,32 @@ stages:
               helm lint $(CHART_PATH) --values $(CHART_PATH)/values.yaml --strict
             displayName: "Helm Lint Chart"
 
-  # ─── Stage 2: Deploy Istio Config ─────────────────────────────────────────
+  ############################################################################
+  # STAGE 2: DEPLOY ISTIO — fetch KV secrets, apply Gateway + VirtualService
+  ############################################################################
   - stage: DeployIstio
     displayName: "Deploy Istio Gateway + VirtualService"
     dependsOn: SecurityScan
     condition: succeeded()
     jobs:
       - deployment: IstioConfig
+        displayName: "Apply Istio CRDs"
         environment: "production"
         strategy:
           runOnce:
             deploy:
               steps:
                 - checkout: self
+
+                # ── Fetch secrets from Azure Key Vault ─────────────────────
+                - task: AzureKeyVault@2
+                  displayName: "Fetch secrets from Azure Key Vault"
+                  inputs:
+                    azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
+                    KeyVaultName: "$(AKV_NAME)"
+                    SecretsFilter: "AWS-ACCESS-KEY-ID,AWS-SECRET-ACCESS-KEY,AWS-REGION,EKS-CLUSTER-NAME"
+                    RunAsPreJob: false
+
                 - script: |
                     # Install kubectl
                     curl -LO "https://dl.k8s.io/release/v$(KUBECTL_VERSION)/bin/linux/amd64/kubectl"
@@ -96,48 +120,57 @@ stages:
                     curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
                     unzip -q awscliv2.zip && sudo ./aws/install
 
-                    # Configure kubeconfig
+                    # Configure kubeconfig using KV-sourced values
                     aws eks update-kubeconfig \
-                      --region $(AWS_REGION) \
-                      --name $(EKS_CLUSTER_NAME)
-                  displayName: "Setup kubectl + AWS CLI"
+                      --region $(AWS-REGION) \
+                      --name $(EKS-CLUSTER-NAME)
+                  displayName: "Setup kubectl + kubeconfig"
                   env:
-                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
-                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
-                    AWS_DEFAULT_REGION: $(AWS_REGION)
+                    AWS_ACCESS_KEY_ID: $(AWS-ACCESS-KEY-ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS-SECRET-ACCESS-KEY)
+                    AWS_DEFAULT_REGION: $(AWS-REGION)
 
                 - script: |
-                    # Apply Istio Gateway
                     kubectl apply -f $(ISTIO_PATH)/gateway.yaml
-                    echo "Waiting for Gateway to be ready..."
+                    echo "Waiting 10s for Gateway to be ready..."
                     sleep 10
-
-                    # Apply VirtualService + DestinationRules
                     kubectl apply -f $(ISTIO_PATH)/virtualservice.yaml
 
-                    # Verify
+                    echo "── Verification ──"
                     kubectl get gateway -n istio-system
                     kubectl get virtualservice -n default
                     kubectl get destinationrule -n default
                   displayName: "Apply Istio Gateway + VirtualService"
                   env:
-                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
-                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                    AWS_ACCESS_KEY_ID: $(AWS-ACCESS-KEY-ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS-SECRET-ACCESS-KEY)
 
-  # ─── Stage 3: Deploy Microservices (Helm) ─────────────────────────────────
+  ############################################################################
+  # STAGE 3: DEPLOY APPS — Helm upgrade app1 + app2
+  ############################################################################
   - stage: DeployApps
     displayName: "Deploy app1 + app2 via Helm"
     dependsOn: DeployIstio
     condition: succeeded()
     jobs:
       - deployment: DeployApp1
-        displayName: "Deploy app1"
+        displayName: "Helm deploy app1"
         environment: "production"
         strategy:
           runOnce:
             deploy:
               steps:
                 - checkout: self
+
+                # ── Fetch ALL required secrets ──────────────────────────────
+                - task: AzureKeyVault@2
+                  displayName: "Fetch secrets from Azure Key Vault"
+                  inputs:
+                    azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
+                    KeyVaultName: "$(AKV_NAME)"
+                    SecretsFilter: "AWS-ACCESS-KEY-ID,AWS-SECRET-ACCESS-KEY,AWS-REGION,EKS-CLUSTER-NAME,APP1-IMAGE-TAG"
+                    RunAsPreJob: false
+
                 - script: |
                     # Install tools
                     curl -fsSL https://get.helm.sh/helm-v$(HELM_VERSION)-linux-amd64.tar.gz | tar -xz
@@ -146,53 +179,62 @@ stages:
                     chmod +x kubectl && sudo mv kubectl /usr/local/bin/
                     curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
                     unzip -q awscliv2.zip && sudo ./aws/install
-                    aws eks update-kubeconfig --region $(AWS_REGION) --name $(EKS_CLUSTER_NAME)
-                  displayName: "Setup Tools"
+
+                    # Configure kubeconfig with KV-sourced values
+                    aws eks update-kubeconfig --region $(AWS-REGION) --name $(EKS-CLUSTER-NAME)
+                  displayName: "Setup Tools + kubeconfig"
                   env:
-                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
-                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
-                    AWS_DEFAULT_REGION: $(AWS_REGION)
+                    AWS_ACCESS_KEY_ID: $(AWS-ACCESS-KEY-ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS-SECRET-ACCESS-KEY)
+                    AWS_DEFAULT_REGION: $(AWS-REGION)
 
                 - script: |
-                    # Helm diff (drift detection — install plugin if needed)
-                    helm plugin install https://github.com/databus23/helm-diff || true
+                    # helm-diff plugin for drift detection
+                    helm plugin install https://github.com/databus23/helm-diff 2>/dev/null || true
 
-                    # Show diff before upgrade
+                    # Drift check — show what would change
                     helm diff upgrade app1 $(CHART_PATH) \
                       --namespace $(NAMESPACE) \
                       --set appName=app1 \
-                      --set image.tag=$(APP1_IMAGE_TAG) \
-                      --set replicaCount=2 \
-                      || true   # diff exits non-zero when changes exist
+                      --set image.tag=$(APP1-IMAGE-TAG) \
+                      || true
 
-                    # Deploy app1
+                    # Deploy app1 using image tag from Key Vault
                     helm upgrade --install app1 $(CHART_PATH) \
                       --namespace $(NAMESPACE) \
                       --create-namespace \
                       --set appName=app1 \
                       --set image.repository=nginx \
-                      --set image.tag=$(APP1_IMAGE_TAG) \
+                      --set "image.tag=$(APP1-IMAGE-TAG)" \
                       --set replicaCount=2 \
                       --set service.type=ClusterIP \
                       --atomic \
                       --timeout 5m \
                       --wait
 
-                    # Verify rollout
                     kubectl rollout status deployment/app1 -n $(NAMESPACE) --timeout=5m
-                  displayName: "Helm Deploy app1"
+                  displayName: "Helm Deploy app1 (tag from AKV)"
                   env:
-                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
-                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                    AWS_ACCESS_KEY_ID: $(AWS-ACCESS-KEY-ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS-SECRET-ACCESS-KEY)
 
       - deployment: DeployApp2
-        displayName: "Deploy app2"
+        displayName: "Helm deploy app2"
         environment: "production"
         strategy:
           runOnce:
             deploy:
               steps:
                 - checkout: self
+
+                - task: AzureKeyVault@2
+                  displayName: "Fetch secrets from Azure Key Vault"
+                  inputs:
+                    azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
+                    KeyVaultName: "$(AKV_NAME)"
+                    SecretsFilter: "AWS-ACCESS-KEY-ID,AWS-SECRET-ACCESS-KEY,AWS-REGION,EKS-CLUSTER-NAME,APP2-IMAGE-TAG"
+                    RunAsPreJob: false
+
                 - script: |
                     curl -fsSL https://get.helm.sh/helm-v$(HELM_VERSION)-linux-amd64.tar.gz | tar -xz
                     sudo mv linux-amd64/helm /usr/local/bin/
@@ -200,20 +242,20 @@ stages:
                     chmod +x kubectl && sudo mv kubectl /usr/local/bin/
                     curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
                     unzip -q awscliv2.zip && sudo ./aws/install
-                    aws eks update-kubeconfig --region $(AWS_REGION) --name $(EKS_CLUSTER_NAME)
-                  displayName: "Setup Tools"
+                    aws eks update-kubeconfig --region $(AWS-REGION) --name $(EKS-CLUSTER-NAME)
+                  displayName: "Setup Tools + kubeconfig"
                   env:
-                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
-                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
-                    AWS_DEFAULT_REGION: $(AWS_REGION)
+                    AWS_ACCESS_KEY_ID: $(AWS-ACCESS-KEY-ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS-SECRET-ACCESS-KEY)
+                    AWS_DEFAULT_REGION: $(AWS-REGION)
 
                 - script: |
-                    helm plugin install https://github.com/databus23/helm-diff || true
+                    helm plugin install https://github.com/databus23/helm-diff 2>/dev/null || true
 
                     helm diff upgrade app2 $(CHART_PATH) \
                       --namespace $(NAMESPACE) \
                       --set appName=app2 \
-                      --set image.tag=$(APP2_IMAGE_TAG) \
+                      --set image.tag=$(APP2-IMAGE-TAG) \
                       || true
 
                     helm upgrade --install app2 $(CHART_PATH) \
@@ -221,7 +263,7 @@ stages:
                       --create-namespace \
                       --set appName=app2 \
                       --set image.repository=nginx \
-                      --set image.tag=$(APP2_IMAGE_TAG) \
+                      --set "image.tag=$(APP2-IMAGE-TAG)" \
                       --set replicaCount=2 \
                       --set service.type=ClusterIP \
                       --atomic \
@@ -229,47 +271,59 @@ stages:
                       --wait
 
                     kubectl rollout status deployment/app2 -n $(NAMESPACE) --timeout=5m
-                  displayName: "Helm Deploy app2"
+                  displayName: "Helm Deploy app2 (tag from AKV)"
                   env:
-                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
-                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
+                    AWS_ACCESS_KEY_ID: $(AWS-ACCESS-KEY-ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS-SECRET-ACCESS-KEY)
 
-  # ─── Stage 4: Smoke Test ───────────────────────────────────────────────────
+  ############################################################################
+  # STAGE 4: SMOKE TEST
+  ############################################################################
   - stage: SmokeTest
-    displayName: "Smoke Test"
+    displayName: "Smoke Test (/app1 + /app2)"
     dependsOn: DeployApps
     condition: succeeded()
     jobs:
       - job: SmokeTest
         steps:
           - checkout: self
+
+          # ── Fetch minimal secrets for smoke test ──────────────────────────
+          - task: AzureKeyVault@2
+            displayName: "Fetch secrets from Azure Key Vault"
+            inputs:
+              azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
+              KeyVaultName: "$(AKV_NAME)"
+              SecretsFilter: "AWS-ACCESS-KEY-ID,AWS-SECRET-ACCESS-KEY,AWS-REGION,EKS-CLUSTER-NAME"
+              RunAsPreJob: false
+
           - script: |
               curl -LO "https://dl.k8s.io/release/v$(KUBECTL_VERSION)/bin/linux/amd64/kubectl"
               chmod +x kubectl && sudo mv kubectl /usr/local/bin/
               curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
               unzip -q awscliv2.zip && sudo ./aws/install
-              aws eks update-kubeconfig --region $(AWS_REGION) --name $(EKS_CLUSTER_NAME)
+              aws eks update-kubeconfig --region $(AWS-REGION) --name $(EKS-CLUSTER-NAME)
 
-              # Verify pods are Running
+              echo "── Pod status ──"
               kubectl get pods -n $(NAMESPACE) -l release=app1
               kubectl get pods -n $(NAMESPACE) -l release=app2
 
-              # Get Istio Ingress Gateway External IP
-              INGRESS_IP=$(kubectl get svc istio-ingressgateway -n istio-system \
-                -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || \
+              # Get Istio Ingress Gateway External IP/hostname
+              INGRESS_HOST=$(kubectl get svc istio-ingressgateway -n istio-system \
+                -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || \
                 kubectl get svc istio-ingressgateway -n istio-system \
-                -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-              echo "Istio Ingress: $INGRESS_IP"
+                -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+              echo "Istio Ingress: $INGRESS_HOST"
 
-              # Curl test (retry up to 5 times)
+              # Retry smoke tests
               for i in 1 2 3 4 5; do
-                curl -sf "http://$INGRESS_IP/app1/" && echo "app1 OK" && break || sleep 15
+                curl -sf "http://$INGRESS_HOST/app1/" && echo "✅ /app1 OK" && break || sleep 15
               done
               for i in 1 2 3 4 5; do
-                curl -sf "http://$INGRESS_IP/app2/" && echo "app2 OK" && break || sleep 15
+                curl -sf "http://$INGRESS_HOST/app2/" && echo "✅ /app2 OK" && break || sleep 15
               done
-            displayName: "Smoke Test Endpoints"
+            displayName: "Smoke Test /app1 + /app2"
             env:
-              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
-              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
-              AWS_DEFAULT_REGION: $(AWS_REGION)
+              AWS_ACCESS_KEY_ID: $(AWS-ACCESS-KEY-ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS-SECRET-ACCESS-KEY)
+              AWS_DEFAULT_REGION: $(AWS-REGION)

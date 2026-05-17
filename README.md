@@ -414,35 +414,28 @@ curl http://$ALB_DNS/app2/
 
 ## Azure DevOps CI/CD Pipeline Setup
 
-### Variable Groups (Library)
+All pipeline secrets are managed via **Azure Key Vault** and fetched on-demand at runtime. Plain non-secret variables are managed using a single `pipeline-config` Variable Group.
 
-Create the following Variable Groups in **Azure DevOps → Pipelines → Library**:
+### Azure Key Vault & Secret Management
+For a step-by-step setup guide including Key Vault creation, secret mapping, and Service Connection setup, see the [Azure Key Vault Setup Guide](file:///docs/azure-keyvault-setup.md).
 
-#### 1. `aws-credentials`
-| Variable | Description | Secret |
-|---|---|---|
-| `AWS_ACCESS_KEY_ID` | AWS IAM user access key | ✅ Yes |
-| `AWS_SECRET_ACCESS_KEY` | AWS IAM user secret key | ✅ Yes |
-| `AWS_REGION` | Target region (e.g., `ap-southeast-1`) | No |
+#### 1. Key Vault Secrets Configuration
+Ensure the following secrets are created in your vault:
+- `AWS-ACCESS-KEY-ID`: AWS IAM user access key.
+- `AWS-SECRET-ACCESS-KEY`: AWS IAM user secret key.
+- `AWS-REGION`: Target AWS region (e.g. `ap-southeast-1`).
+- `TF-BACKEND-BUCKET`: S3 bucket name storing state.
+- `TF-BACKEND-KEY`: Path to state file (e.g. `hub-spoke/terraform.tfstate`).
+- `TF-BACKEND-REGION`: S3 bucket region.
+- `EKS-CLUSTER-NAME`: Target EKS cluster name.
+- `APP1-IMAGE-TAG`: Nginx image tag for app1 (e.g. `1.27.0-alpine`).
+- `APP2-IMAGE-TAG`: Nginx image tag for app2 (e.g. `1.27.0-alpine`).
 
-#### 2. `tf-backend`
-| Variable | Description | Secret |
-|---|---|---|
-| `TF_BACKEND_BUCKET` | S3 bucket name for Terraform state | No |
-| `TF_BACKEND_KEY` | S3 object key (path) for state file | No |
-| `TF_BACKEND_REGION` | S3 bucket region | No |
-
-#### 3. `eks-config`
-| Variable | Description | Secret |
-|---|---|---|
-| `EKS_CLUSTER_NAME` | EKS cluster name (e.g., `hubspoke-eks-cluster`) | No |
-
-#### 4. `app-config`
-| Variable | Description | Secret |
-|---|---|---|
-| `APP1_IMAGE_TAG` | Nginx image tag for app1 (e.g., `1.27.0-alpine`) | No |
-| `APP2_IMAGE_TAG` | Nginx image tag for app2 (e.g., `1.27.0-alpine`) | No |
-| `NAMESPACE` | Kubernetes namespace (e.g., `default`) | No |
+#### 2. Non-Secret Variable Group: `pipeline-config`
+Create a non-secret Variable Group in **Azure DevOps → Pipelines → Library** with:
+- `AKV_NAME`: Name of your Key Vault (e.g. `hubspoke-vault`).
+- `AZURE_SERVICE_CONNECTION`: Name of your ADO service connection (e.g. `Azure-ARM-Service-Connection`).
+- `NAMESPACE`: Namespace for deployment (e.g. `default`).
 
 ### Pipeline Registration
 

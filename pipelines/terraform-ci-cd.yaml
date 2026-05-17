@@ -1,8 +1,25 @@
 ################################################################################
 # terraform-ci-cd.yaml — Azure DevOps Pipeline: Terraform Infrastructure
-# Variable Groups Required:
-#   - "aws-credentials"  → AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION
-#   - "tf-backend"       → TF_BACKEND_BUCKET, TF_BACKEND_KEY, TF_BACKEND_REGION
+#
+# SECRET MANAGEMENT: Azure Key Vault (AzureKeyVault@2 task)
+# ─────────────────────────────────────────────────────────
+# All sensitive values are fetched from Azure Key Vault at runtime.
+# NO secrets are stored in Variable Groups or plain pipeline variables.
+#
+# Required Azure Key Vault secrets (name → pipeline variable):
+#   AWS-ACCESS-KEY-ID       → $(AWS-ACCESS-KEY-ID)
+#   AWS-SECRET-ACCESS-KEY   → $(AWS-SECRET-ACCESS-KEY)
+#   AWS-REGION              → $(AWS-REGION)
+#   TF-BACKEND-BUCKET       → $(TF-BACKEND-BUCKET)
+#   TF-BACKEND-KEY          → $(TF-BACKEND-KEY)
+#   TF-BACKEND-REGION       → $(TF-BACKEND-REGION)
+#
+# Required non-secret Variable Group (plain values only):
+#   - "pipeline-config"  → AKV_NAME (Key Vault name), AZURE_SERVICE_CONNECTION
+#
+# Pre-requisites:
+#   1. Azure Service Connection with "Get" + "List" permission on the Key Vault
+#   2. All secrets created in Azure Key Vault (see docs/azure-keyvault-setup.md)
 ################################################################################
 
 trigger:
@@ -18,8 +35,8 @@ pr:
     include: [terraform/**]
 
 variables:
-  - group: aws-credentials
-  - group: tf-backend
+  # ── Non-secret pipeline config (plain Variable Group — no secrets here) ──────
+  - group: pipeline-config           # contains: AKV_NAME, AZURE_SERVICE_CONNECTION
   - name: TF_VERSION
     value: "1.8.1"
   - name: WORKING_DIR
@@ -31,9 +48,11 @@ pool:
   vmImage: "ubuntu-22.04"
 
 stages:
-  # ─── Stage 1: Security Scan (Gitleaks + tfsec) ─────────────────────────────
+  ############################################################################
+  # STAGE 1: SECURITY SCAN — Gitleaks + tfsec (no secrets needed)
+  ############################################################################
   - stage: SecurityScan
-    displayName: "Security Scan"
+    displayName: "Security Scan (Gitleaks + tfsec)"
     jobs:
       - job: Gitleaks
         displayName: "Gitleaks Secrets Detection"
@@ -76,13 +95,16 @@ stages:
               pathToPublish: "$(Build.ArtifactStagingDirectory)/tfsec-report.json"
               artifactName: "security-reports"
 
-  # ─── Stage 2: Validate ─────────────────────────────────────────────────────
+  ############################################################################
+  # STAGE 2: VALIDATE — terraform fmt + validate (no AWS creds needed)
+  ############################################################################
   - stage: Validate
     displayName: "Terraform Validate"
     dependsOn: SecurityScan
     condition: succeeded()
     jobs:
       - job: TerraformValidate
+        displayName: "fmt + init (no-backend) + validate"
         steps:
           - checkout: self
           - script: |
@@ -92,72 +114,130 @@ stages:
               terraform init -backend=false
               terraform validate
             workingDirectory: $(WORKING_DIR)
-            displayName: "fmt + init + validate"
+            displayName: "terraform fmt + validate"
 
-  # ─── Stage 3: Plan ─────────────────────────────────────────────────────────
+  ############################################################################
+  # STAGE 3: PLAN — fetch secrets from Azure Key Vault, then plan
+  ############################################################################
   - stage: Plan
     displayName: "Terraform Plan"
     dependsOn: Validate
     condition: succeeded()
     jobs:
       - job: TerraformPlan
+        displayName: "terraform plan (AKV-sourced credentials)"
         steps:
           - checkout: self
+
+          # ── Step 1: Fetch ALL secrets from Azure Key Vault ────────────────
+          - task: AzureKeyVault@2
+            displayName: "Fetch secrets from Azure Key Vault"
+            inputs:
+              azureSubscription: "$(AZURE_SERVICE_CONNECTION)"   # Service Connection name
+              KeyVaultName: "$(AKV_NAME)"                        # e.g. hubspoke-kv
+              SecretsFilter: "AWS-ACCESS-KEY-ID,AWS-SECRET-ACCESS-KEY,AWS-REGION,TF-BACKEND-BUCKET,TF-BACKEND-KEY,TF-BACKEND-REGION"
+              RunAsPreJob: false
+            # After this task, secrets are available as:
+            #   $(AWS-ACCESS-KEY-ID)  $(AWS-SECRET-ACCESS-KEY)  etc.
+
+          # ── Step 2: Install Terraform ──────────────────────────────────────
           - script: |
               wget -q https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip
               unzip -q terraform_$(TF_VERSION)_linux_amd64.zip -d /usr/local/bin/
+              terraform version
+            displayName: "Install Terraform $(TF_VERSION)"
+
+          # ── Step 3: terraform init with S3 backend ────────────────────────
+          - script: |
               terraform init \
-                -backend-config="bucket=$(TF_BACKEND_BUCKET)" \
-                -backend-config="key=$(TF_BACKEND_KEY)" \
-                -backend-config="region=$(TF_BACKEND_REGION)" \
-                -backend-config="encrypt=true"
-              terraform plan -out="$(PLAN_FILE)" -var="aws_region=$(AWS_REGION)" -input=false
+                -backend-config="bucket=$(TF-BACKEND-BUCKET)" \
+                -backend-config="key=$(TF-BACKEND-KEY)" \
+                -backend-config="region=$(TF-BACKEND-REGION)" \
+                -backend-config="encrypt=true" \
+                -input=false
             workingDirectory: $(WORKING_DIR)
-            displayName: "terraform init + plan"
+            displayName: "terraform init (S3 backend)"
             env:
-              AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
-              AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
-              AWS_DEFAULT_REGION: $(AWS_REGION)
+              # Map KV secret names (hyphens) → AWS CLI env vars (underscores)
+              AWS_ACCESS_KEY_ID: $(AWS-ACCESS-KEY-ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS-SECRET-ACCESS-KEY)
+              AWS_DEFAULT_REGION: $(AWS-REGION)
+
+          # ── Step 4: terraform plan ─────────────────────────────────────────
+          - script: |
+              terraform plan \
+                -out="$(PLAN_FILE)" \
+                -var="aws_region=$(AWS-REGION)" \
+                -input=false \
+                -detailed-exitcode
+            workingDirectory: $(WORKING_DIR)
+            displayName: "terraform plan"
+            env:
+              AWS_ACCESS_KEY_ID: $(AWS-ACCESS-KEY-ID)
+              AWS_SECRET_ACCESS_KEY: $(AWS-SECRET-ACCESS-KEY)
+              AWS_DEFAULT_REGION: $(AWS-REGION)
+
           - task: PublishBuildArtifacts@1
             inputs:
               pathToPublish: "$(Build.ArtifactStagingDirectory)"
               artifactName: "terraform-plan"
+            displayName: "Publish plan artifact"
 
-  # ─── Stage 4: Apply (Manual Approval Gate) ─────────────────────────────────
+  ############################################################################
+  # STAGE 4: APPLY — manual approval gate + AKV creds + apply
+  ############################################################################
   - stage: Apply
     displayName: "Terraform Apply"
     dependsOn: Plan
     condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
     jobs:
       - deployment: TerraformApply
-        environment: "production"   # Configure approval gate in ADO Environments UI
+        displayName: "terraform apply (AKV-sourced credentials)"
+        environment: "production"   # ADO Environment — configure Approval + Check here
         strategy:
           runOnce:
             deploy:
               steps:
                 - checkout: self
+
+                # ── Fetch secrets from Azure Key Vault ─────────────────────
+                - task: AzureKeyVault@2
+                  displayName: "Fetch secrets from Azure Key Vault"
+                  inputs:
+                    azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
+                    KeyVaultName: "$(AKV_NAME)"
+                    SecretsFilter: "AWS-ACCESS-KEY-ID,AWS-SECRET-ACCESS-KEY,AWS-REGION,TF-BACKEND-BUCKET,TF-BACKEND-KEY,TF-BACKEND-REGION"
+                    RunAsPreJob: false
+
                 - script: |
                     wget -q https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip
                     unzip -q terraform_$(TF_VERSION)_linux_amd64.zip -d /usr/local/bin/
                   displayName: "Install Terraform"
+
                 - task: DownloadBuildArtifacts@1
                   inputs:
                     artifactName: "terraform-plan"
                     downloadPath: "$(Build.ArtifactStagingDirectory)"
+                  displayName: "Download plan artifact"
+
                 - script: |
                     terraform init \
-                      -backend-config="bucket=$(TF_BACKEND_BUCKET)" \
-                      -backend-config="key=$(TF_BACKEND_KEY)" \
-                      -backend-config="region=$(TF_BACKEND_REGION)"
+                      -backend-config="bucket=$(TF-BACKEND-BUCKET)" \
+                      -backend-config="key=$(TF-BACKEND-KEY)" \
+                      -backend-config="region=$(TF-BACKEND-REGION)" \
+                      -backend-config="encrypt=true" \
+                      -input=false
                     terraform apply -auto-approve -input=false "$(PLAN_FILE)"
                     terraform output -json > $(Build.ArtifactStagingDirectory)/tf-outputs.json
                   workingDirectory: $(WORKING_DIR)
                   displayName: "terraform apply"
                   env:
-                    AWS_ACCESS_KEY_ID: $(AWS_ACCESS_KEY_ID)
-                    AWS_SECRET_ACCESS_KEY: $(AWS_SECRET_ACCESS_KEY)
-                    AWS_DEFAULT_REGION: $(AWS_REGION)
+                    AWS_ACCESS_KEY_ID: $(AWS-ACCESS-KEY-ID)
+                    AWS_SECRET_ACCESS_KEY: $(AWS-SECRET-ACCESS-KEY)
+                    AWS_DEFAULT_REGION: $(AWS-REGION)
+
                 - task: PublishBuildArtifacts@1
                   inputs:
                     pathToPublish: "$(Build.ArtifactStagingDirectory)/tf-outputs.json"
                     artifactName: "terraform-outputs"
+                  displayName: "Publish Terraform outputs"

@@ -21,8 +21,8 @@ keywords:
   - hub-spoke
 
 maintainers:
-  - name: platform-team
-    email: platform@example.com
+  - name: devops
+    email: jsvivek3@gmail.com
 
 annotations:
   artifacthub.io/changes: |
