@@ -168,7 +168,7 @@ stages:
                   inputs:
                     azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
                     KeyVaultName: "$(AKV_NAME)"
-                    SecretsFilter: "AWS-ACCESS-KEY-ID,AWS-SECRET-ACCESS-KEY,AWS-REGION,EKS-CLUSTER-NAME,APP1-IMAGE-TAG"
+                    SecretsFilter: "AWS-ACCESS-KEY-ID,AWS-SECRET-ACCESS-KEY,AWS-REGION,EKS-CLUSTER-NAME,APP1-VALUES-YAML"
                     RunAsPreJob: false
 
                 - script: |
@@ -189,31 +189,38 @@ stages:
                     AWS_DEFAULT_REGION: $(AWS-REGION)
 
                 - script: |
+                    # Write the values.yaml payload from Key Vault secret to local file
+                    cat << 'EOF' > app1-values-override.yaml
+$(APP1-VALUES-YAML)
+EOF
+
+                    # Verify that a valid values.yaml file was created
+                    if [ ! -s app1-values-override.yaml ]; then
+                      echo "❌ Error: APP1-VALUES-YAML secret from Key Vault is empty or not found!"
+                      exit 1
+                    fi
+                    echo "✅ Created app1-values-override.yaml successfully"
+
                     # helm-diff plugin for drift detection
                     helm plugin install https://github.com/databus23/helm-diff 2>/dev/null || true
 
                     # Drift check — show what would change
                     helm diff upgrade app1 $(CHART_PATH) \
                       --namespace $(NAMESPACE) \
-                      --set appName=app1 \
-                      --set image.tag=$(APP1-IMAGE-TAG) \
+                      -f app1-values-override.yaml \
                       || true
 
-                    # Deploy app1 using image tag from Key Vault
+                    # Deploy app1 using values.yaml retrieved from Key Vault
                     helm upgrade --install app1 $(CHART_PATH) \
                       --namespace $(NAMESPACE) \
                       --create-namespace \
-                      --set appName=app1 \
-                      --set image.repository=nginx \
-                      --set "image.tag=$(APP1-IMAGE-TAG)" \
-                      --set replicaCount=2 \
-                      --set service.type=ClusterIP \
+                      -f app1-values-override.yaml \
                       --atomic \
                       --timeout 5m \
                       --wait
 
                     kubectl rollout status deployment/app1 -n $(NAMESPACE) --timeout=5m
-                  displayName: "Helm Deploy app1 (tag from AKV)"
+                  displayName: "Helm Deploy app1 (values.yaml from AKV)"
                   env:
                     AWS_ACCESS_KEY_ID: $(AWS-ACCESS-KEY-ID)
                     AWS_SECRET_ACCESS_KEY: $(AWS-SECRET-ACCESS-KEY)
@@ -232,7 +239,7 @@ stages:
                   inputs:
                     azureSubscription: "$(AZURE_SERVICE_CONNECTION)"
                     KeyVaultName: "$(AKV_NAME)"
-                    SecretsFilter: "AWS-ACCESS-KEY-ID,AWS-SECRET-ACCESS-KEY,AWS-REGION,EKS-CLUSTER-NAME,APP2-IMAGE-TAG"
+                    SecretsFilter: "AWS-ACCESS-KEY-ID,AWS-SECRET-ACCESS-KEY,AWS-REGION,EKS-CLUSTER-NAME,APP2-VALUES-YAML"
                     RunAsPreJob: false
 
                 - script: |
@@ -250,28 +257,38 @@ stages:
                     AWS_DEFAULT_REGION: $(AWS-REGION)
 
                 - script: |
+                    # Write the values.yaml payload from Key Vault secret to local file
+                    cat << 'EOF' > app2-values-override.yaml
+$(APP2-VALUES-YAML)
+EOF
+
+                    # Verify that a valid values.yaml file was created
+                    if [ ! -s app2-values-override.yaml ]; then
+                      echo "❌ Error: APP2-VALUES-YAML secret from Key Vault is empty or not found!"
+                      exit 1
+                    fi
+                    echo "✅ Created app2-values-override.yaml successfully"
+
+                    # helm-diff plugin for drift detection
                     helm plugin install https://github.com/databus23/helm-diff 2>/dev/null || true
 
+                    # Drift check — show what would change
                     helm diff upgrade app2 $(CHART_PATH) \
                       --namespace $(NAMESPACE) \
-                      --set appName=app2 \
-                      --set image.tag=$(APP2-IMAGE-TAG) \
+                      -f app2-values-override.yaml \
                       || true
 
+                    # Deploy app2 using values.yaml retrieved from Key Vault
                     helm upgrade --install app2 $(CHART_PATH) \
                       --namespace $(NAMESPACE) \
                       --create-namespace \
-                      --set appName=app2 \
-                      --set image.repository=nginx \
-                      --set "image.tag=$(APP2-IMAGE-TAG)" \
-                      --set replicaCount=2 \
-                      --set service.type=ClusterIP \
+                      -f app2-values-override.yaml \
                       --atomic \
                       --timeout 5m \
                       --wait
 
                     kubectl rollout status deployment/app2 -n $(NAMESPACE) --timeout=5m
-                  displayName: "Helm Deploy app2 (tag from AKV)"
+                  displayName: "Helm Deploy app2 (values.yaml from AKV)"
                   env:
                     AWS_ACCESS_KEY_ID: $(AWS-ACCESS-KEY-ID)
                     AWS_SECRET_ACCESS_KEY: $(AWS-SECRET-ACCESS-KEY)

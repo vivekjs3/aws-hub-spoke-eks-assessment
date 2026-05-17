@@ -428,8 +428,8 @@ Ensure the following secrets are created in your vault:
 - `TF-BACKEND-KEY`: Path to state file (e.g. `hub-spoke/terraform.tfstate`).
 - `TF-BACKEND-REGION`: S3 bucket region.
 - `EKS-CLUSTER-NAME`: Target EKS cluster name.
-- `APP1-IMAGE-TAG`: Nginx image tag for app1 (e.g. `1.27.0-alpine`).
-- `APP2-IMAGE-TAG`: Nginx image tag for app2 (e.g. `1.27.0-alpine`).
+- `APP1-VALUES-YAML`: Complete custom `values.yaml` payload for app1.
+- `APP2-VALUES-YAML`: Complete custom `values.yaml` payload for app2.
 
 #### 2. Non-Secret Variable Group: `pipeline-config`
 Create a non-secret Variable Group in **Azure DevOps → Pipelines → Library** with:

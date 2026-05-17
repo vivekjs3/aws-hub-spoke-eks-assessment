@@ -32,11 +32,14 @@ az keyvault secret set --vault-name "hubspoke-vault" --name "TF-BACKEND-REGION" 
 
 # EKS & App Deployment Config
 az keyvault secret set --vault-name "hubspoke-vault" --name "EKS-CLUSTER-NAME" --value "hubspoke-eks-cluster"
-az keyvault secret set --vault-name "hubspoke-vault" --name "APP1-IMAGE-TAG" --value "1.27.0-alpine"
-az keyvault secret set --vault-name "hubspoke-vault" --name "APP2-IMAGE-TAG" --value "1.27.0-alpine"
+
+# Storing Complete values.yaml Payloads as secrets
+# Save your exact custom values.yaml for app1 & app2 into Key Vault secrets:
+az keyvault secret set --vault-name "hubspoke-vault" --name "APP1-VALUES-YAML" --file "app1-values.yaml"
+az keyvault secret set --vault-name "hubspoke-vault" --name "APP2-VALUES-YAML" --file "app2-values.yaml"
 ```
 
-*Note: Azure Key Vault secrets must use hyphens (`-`) instead of underscores (`_`) due to character validation constraints.*
+*Note: Azure Key Vault secrets must use hyphens (`-`) instead of underscores (`_`) due to character validation constraints. You can upload local yaml files directly using the `--file` flag in the Azure CLI as shown above.*
 
 ---
 
